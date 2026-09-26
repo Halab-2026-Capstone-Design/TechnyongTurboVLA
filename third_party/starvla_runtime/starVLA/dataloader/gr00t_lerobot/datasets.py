@@ -71,6 +71,23 @@ EPSILON = 5e-4
 LE_ROBOT3_TASKS_FILENAME = "meta/tasks.parquet"
 LE_ROBOT3_EPISODE_FILENAME = "meta/episodes/*/*.parquet"
 
+#0926추가
+def decode_lerobot_depth(depth_code):
+    """Behavior-1K 2026 Challenge log-quantized depth to meters"""
+    import torch
+    import numpy as np
+    
+    SHIFT = 3.5
+    MAX_D = 10.0
+    lo = np.log(SHIFT)
+    hi = np.log(MAX_D + SHIFT)
+    
+    if isinstance(depth_code, torch.Tensor):
+        metres = torch.exp(depth_code / 4095.0 * (hi - lo) + lo) - SHIFT
+    else:
+        metres = np.exp(depth_code / 4095.0 * (hi - lo) + lo) - SHIFT
+    return metres
+##
 
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
@@ -1399,9 +1416,32 @@ class LeRobotSingleDataset(Dataset):
         """Pack transformed modality data into training sample format."""
         step_images = []
         for video_key in self.modality_keys["video"]:
-            image = data[video_key][0]
-            image = Image.fromarray(image).resize((224, 224))
-            step_images.append(image)
+            image_array = data[video_key][0] # numpy array or tensor
+            
+            # 4채널(RGB-D)일 경우 분리 및 디코딩 처리
+            if image_array.shape[-1] == 4:
+                # RGB 채널은 기존대로 PIL 변환
+                rgb_array = image_array[..., :3]
+                rgb_img = Image.fromarray(rgb_array.astype(np.uint8)).resize((224, 224))
+                
+                # Depth 채널(4번째) 디코딩 후 미터(meter) 단위 텐서로 변환
+                depth_array = image_array[..., 3]
+                decoded_depth = decode_lerobot_depth(depth_array)
+                # 224x224 리사이즈를 위해 잠시 PIL 변환(float32 모드 'F') 후 리사이즈
+                depth_img = Image.fromarray(decoded_depth.astype(np.float32), mode='F').resize((224, 224))
+                
+                # RGB와 Depth를 묶어 튜플이나 딕셔너리로 저장 (후속 모델 입력단에 맞춰야 함)
+                # 모델(Vision Encoder)이 채널 차원(C=4)으로 붙은 입력을 원하므로 합쳐서 텐서로 변환 가능
+                step_images.append({
+                    "rgb": rgb_img, 
+                    "depth": depth_img
+                })
+            else:
+                # 일반 3채널(RGB) 처리
+                image = Image.fromarray(image_array.astype(np.uint8)).resize((224, 224))
+                step_images.append(image)
+
+        language = data[self.modality_keys["language"][0]][0]
 
         language = data[self.modality_keys["language"][0]][0]
         action = []
