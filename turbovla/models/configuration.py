@@ -52,7 +52,7 @@ class InteractionConfig:
 
 @dataclass
 class ActionHeadConfig:
-    action_dim: int = 7
+    action_dim: int = 32 #Behavior 2026에 맞게 32차원으로 변경
     state_dim: int = 8
     horizon: int = 12
     num_state_tokens: int = 2

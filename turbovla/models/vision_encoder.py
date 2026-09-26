@@ -49,6 +49,38 @@ class DINOv3VisionEncoder(nn.Module):
         self.prefix_tokens = self._prefix_tokens(self.backbone.config, default=5)
         self.num_patches = (config.image_size // self.patch_size) ** 2
 
+        # === [추가 및 수정된 부분 시작] RGB-D (4채널) 입력 처리 ===
+        # Hugging Face 모델 구조(embeddings.patch_embeddings) 또는 일반 timm 구조(patch_embed)에 맞춰 프로젝션 레이어를 찾습니다.
+        if hasattr(self.backbone, "embeddings") and hasattr(self.backbone.embeddings, "patch_embeddings"):
+            old_proj = self.backbone.embeddings.patch_embeddings.projection
+        elif hasattr(self.backbone, "patch_embed") and hasattr(self.backbone.patch_embed, "proj"):
+            old_proj = self.backbone.patch_embed.proj
+        else:
+            raise AttributeError("Vision Encoder에서 Patch Embedding 레이어를 찾을 수 없습니다.")
+
+        # 새로운 4채널(RGB 3 + Depth 1)용 Conv2d 생성
+        new_proj = nn.Conv2d(
+            in_channels=4,
+            out_channels=old_proj.out_channels,
+            kernel_size=old_proj.kernel_size,
+            stride=old_proj.stride,
+            padding=old_proj.padding
+        )
+
+        # 기존 RGB(3채널) 가중치는 복사하고, 4번째 Depth 채널은 RGB 가중치의 평균값으로 초기화
+        with torch.no_grad():
+            new_proj.weight[:, :3, :, :] = old_proj.weight
+            new_proj.weight[:, 3:4, :, :] = old_proj.weight.mean(dim=1, keepdim=True)
+            if old_proj.bias is not None:
+                new_proj.bias.copy_(old_proj.bias)
+
+        # 수정한 레이어를 원본 모델에 덮어쓰기
+        if hasattr(self.backbone, "embeddings") and hasattr(self.backbone.embeddings, "patch_embeddings"):
+            self.backbone.embeddings.patch_embeddings.projection = new_proj
+        else:
+            self.backbone.patch_embed.proj = new_proj
+        # === [추가 및 수정된 부분 끝] ===
+
         embeddings = getattr(self.backbone, "embeddings", None)
         mask_token = getattr(embeddings, "mask_token", None)
         if mask_token is not None:
@@ -119,7 +151,7 @@ class DINOv3VisionEncoder(nn.Module):
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         if pixel_values.ndim != 5:
-            raise ValueError(f"pixel_values must be [B,V,3,H,W], got {tuple(pixel_values.shape)}")
+            raise ValueError(f"pixel_values must be [B,V,4,H,W], got {tuple(pixel_values.shape)}")
         batch_size, num_views = pixel_values.shape[:2]
         if num_views != self.config.num_views:
             raise ValueError(f"expected {self.config.num_views} views, got {num_views}")

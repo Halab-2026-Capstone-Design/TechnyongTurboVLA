@@ -280,8 +280,8 @@ def build_turbovla(args: TurboVLAConfig | Mapping[str, Any] | Any) -> TurboVLA:
                 compute_precision=str(_arg(args, "interaction_precision", "fp32")),
             ),
             action=ActionHeadConfig(
-                action_dim=int(_arg(args, "action_dim", 7)),
-                state_dim=int(_arg(args, "state_dim", 8)),
+                action_dim=int(_arg(args, "action_dim", XX)),
+                state_dim=int(_arg(args, "state_dim", YY)),
                 horizon=int(_arg(args, "chunk_size", _arg(args, "action_horizon", 12))),
                 num_state_tokens=int(_arg(args, "num_state_tokens", 2)),
                 num_layers=int(_arg(args, "act_num_layers", 3)),

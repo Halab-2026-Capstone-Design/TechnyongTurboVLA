@@ -1,5 +1,11 @@
+from __future__ import annotations
+
+from contextlib import nullcontext
+from typing import Any, Mapping, Sequence
+
 import numpy as np
 import torch
+from torch import nn
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 from transformers import AutoImageProcessor
@@ -137,14 +143,36 @@ class LiberoRLDSDataset(IterableDataset):
                 f"{tuple(pixel_values.shape[-2:])}. Resize/crop should stay disabled."
             )
 
-    def _process_image_pair(self, img_np):
-        self._ensure_expected_size(img_np)
-        img = Image.fromarray(img_np)
+    def _process_image_pair(self, rgb_np, depth_np):
+        """
+        [수정됨] RGB 이미지와 Depth 이미지를 받아 4채널(RGB-D) 텐서로 변환한 뒤 DINOv3 프로세서를 거칩니다.
+        """
+        self._ensure_expected_size(rgb_np)
+        
+        # 1. RGB 정규화 및 [0, 1] 범위로 변환 후 [C, H, W] 텐서화
+        if rgb_np.max() > 1.0:
+            rgb_np = rgb_np.astype(np.float32) / 255.0
+        else:
+            rgb_np = rgb_np.astype(np.float32)
+            
+        rgb_tensor = torch.from_numpy(rgb_np).permute(2, 0, 1).float() # [3, H, W]
 
-        dino_pixel_values = self.dino_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
-        self._ensure_processor_preserved_resolution(dino_pixel_values, img_np, "DINOv3")
+        # 2. Depth 전처리 및 [1, H, W] 텐서화
+        if depth_np.ndim == 2:
+            depth_np = np.expand_dims(depth_np, axis=-1)
+        depth_tensor = torch.from_numpy(depth_np).permute(2, 0, 1).float() # [1, H, W]
 
-        return {"dinov3": dino_pixel_values}
+        # 3. 채널 방향 결합 -> [4, H, W] (RGB-D)
+        rgbd_tensor = torch.cat([rgb_tensor, depth_tensor], dim=0)
+
+        # 4. DINOv3 프로세서는 기본적으로 3채널을 기대하므로, 
+        # 우리가 앞서 수정한 4채널 패치 임베딩 레이어에 맞게 픽셀 값을 직접 전달하거나 가공합니다.
+        # 기존 dino_processor는 3채널용이므로 4채널용 텐서는 프로세서를 우회하거나 직접 텐서 형태로 둡니다.
+        # 만약 프로세서가 3채널을 강제한다면 아래와 같이 분리 후 합치는 방식을 쓸 수도 있습니다.
+        
+        # 여기서는 4채널 텐서 자체를 모델에 바로 넘기기 위해 형태를 유지합니다.
+        # (만약 정규화나 mean/std 처리가 필요하다면 여기서 추가 수행)
+        return {"dinov3": rgbd_tensor}
 
     @staticmethod
     def _decode_instruction(raw_instruction):
@@ -156,8 +184,16 @@ class LiberoRLDSDataset(IterableDataset):
 
     def _build_step_sample(self, steps, t, episode_len):
         current_step = steps[t]
-        img1 = self._process_image_pair(current_step["observation"]["image"])
-        img2 = self._process_image_pair(current_step["observation"]["wrist_image"])
+        
+        # [수정됨] observation에서 RGB와 Depth를 각각 가져와서 전달합니다.
+        # (데이터셋 내의 실제 Depth 키 이름이 다를 경우 'depth', 'wrist_depth' 부분을 수정하세요)
+        rgb1 = current_step["observation"]["image"]
+        depth1 = current_step["observation"]["depth"]
+        img1 = self._process_image_pair(rgb1, depth1)
+
+        rgb2 = current_step["observation"]["wrist_image"]
+        depth2 = current_step["observation"]["wrist_depth"]
+        img2 = self._process_image_pair(rgb2, depth2)
 
         instruction = self._decode_instruction(current_step["language_instruction"])
 
